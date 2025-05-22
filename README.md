@@ -72,7 +72,7 @@ Available options:
 
 Convert text using a different voice:
 ```
-python main.py -v Nova
+python main.py -v zephyr
 ```
 
 Specify a custom input file and output directory:
@@ -112,7 +112,7 @@ config = DEFAULT_CONFIG.copy()
 
 # Customize configuration if needed
 config.update({
-    "voice": "Nova",
+    "voice": "zephyr",
     "temperature": 0.7,
     "input_file": "my_text.txt",
     "output_prefix": "custom_output"
