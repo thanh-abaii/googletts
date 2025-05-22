@@ -47,13 +47,13 @@ Chuyển đổi văn bản tiếng Việt hoặc đa ngôn ngữ thành giọng 
     Kết quả sẽ được lưu thành file .wav trong thư mục dự án, tên dạng output_puck_YYYYMMDD_HHMMSS.wav.
     Tiến trình chuyển đổi sẽ hiển thị progress bar theo từng chunk dữ liệu nhận được từ API.
 
-6. **Lưu ý bảo mật**
-    KHÔNG đưa file .env, file âm thanh .wav hoặc thư mục .venv/ lên Github.
-    Đã cấu hình .gitignore chuẩn cho Python project.
+## Lưu ý bảo mật
+- KHÔNG đưa file .env, file âm thanh .wav hoặc thư mục .venv/ lên Github.
+- Đã cấu hình .gitignore chuẩn cho Python project.
 
-7. **Giới hạn**
-    Google Gemini TTS hiện chỉ hỗ trợ sinh tối đa ~5 phút audio mỗi lần gọi API. Văn bản dài hơn cần chia nhỏ và xử lý nhiều lần.
+## Giới hạn
+- Google Gemini TTS hiện chỉ hỗ trợ sinh tối đa ~5 phút audio mỗi lần gọi API. Văn bản dài hơn cần chia nhỏ và xử lý nhiều lần.
 
-8. **Đóng góp & bản quyền**
-    Repo do thanh-abaii phát triển và chia sẻ vì mục đích học thuật, nghiên cứu, không thương mại.
-    Mọi ý kiến đóng góp hoặc vấn đề vui lòng mở issue hoặc liên hệ qua Github.
+## Đóng góp & bản quyền
+- Repo do thanh-abaii phát triển và chia sẻ vì mục đích học thuật, nghiên cứu, không thương mại.
+- Mọi ý kiến đóng góp hoặc vấn đề vui lòng mở issue hoặc liên hệ qua Github.
