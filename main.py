@@ -4,12 +4,17 @@ Google Text-to-Speech Converter
 This script converts text from an input file to speech using Google's Gemini API.
 It reads text from 'input.txt', sends it to the Gemini API for TTS conversion,
 and saves the resulting audio as a WAV file.
+
+Enhanced with text chunking for large files and audio merging capabilities.
 """
 
 import os
 import struct
 import mimetypes
 import logging
+import re
+import tempfile
+import wave
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
@@ -34,7 +39,9 @@ DEFAULT_CONFIG = {
     "temperature": 1.0,
     "input_file": "input.txt",
     "output_dir": ".",
-    "output_prefix": "output"
+    "output_prefix": "output",
+    "max_chunk_size": 3000,  # Maximum characters per chunk
+    "enable_chunking": True   # Enable automatic text chunking for large texts
 }
 
 
@@ -73,6 +80,73 @@ def read_input_text(file_path: str) -> Optional[str]:
         return None
 
 
+def split_text_into_chunks(text: str, max_chunk_size: int = 3000) -> List[str]:
+    """
+    Split text into smaller chunks while preserving sentence boundaries.
+    
+    Args:
+        text: The text to split
+        max_chunk_size: Maximum size of each chunk in characters
+        
+    Returns:
+        List of text chunks
+    """
+    if len(text) <= max_chunk_size:
+        return [text]
+    
+    chunks = []
+    current_chunk = ""
+    
+    # Split by paragraphs first
+    paragraphs = text.split('\n\n')
+    
+    for paragraph in paragraphs:
+        # If paragraph is too long, split by sentences
+        if len(paragraph) > max_chunk_size:
+            sentences = re.split(r'(?<=[.!?])\s+', paragraph)
+            
+            for sentence in sentences:
+                # If adding this sentence would exceed the limit
+                if len(current_chunk) + len(sentence) + 1 > max_chunk_size:
+                    if current_chunk:
+                        chunks.append(current_chunk.strip())
+                        current_chunk = sentence
+                    else:
+                        # Single sentence is too long, split by words
+                        words = sentence.split()
+                        temp_chunk = ""
+                        for word in words:
+                            if len(temp_chunk) + len(word) + 1 > max_chunk_size:
+                                if temp_chunk:
+                                    chunks.append(temp_chunk.strip())
+                                    temp_chunk = word
+                                else:
+                                    # Single word is too long, just add it
+                                    chunks.append(word)
+                            else:
+                                temp_chunk += " " + word if temp_chunk else word
+                        if temp_chunk:
+                            current_chunk = temp_chunk
+                else:
+                    current_chunk += " " + sentence if current_chunk else sentence
+        else:
+            # If adding this paragraph would exceed the limit
+            if len(current_chunk) + len(paragraph) + 2 > max_chunk_size:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                    current_chunk = paragraph
+                else:
+                    current_chunk = paragraph
+            else:
+                current_chunk += "\n\n" + paragraph if current_chunk else paragraph
+    
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    
+    logger.info(f"Split text into {len(chunks)} chunks")
+    return chunks
+
+
 def save_binary_file(file_path: str, data: bytes) -> bool:
     """
     Save binary data to a file.
@@ -94,6 +168,45 @@ def save_binary_file(file_path: str, data: bytes) -> bool:
         return True
     except Exception as e:
         logger.error(f"Error saving file {file_path}: {e}")
+        return False
+
+
+def merge_wav_files(wav_files: List[str], output_path: str) -> bool:
+    """
+    Merge multiple WAV files into a single WAV file.
+    
+    Args:
+        wav_files: List of WAV file paths to merge
+        output_path: Output path for the merged file
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        if not wav_files:
+            logger.error("No WAV files to merge")
+            return False
+        
+        # Read the first file to get audio parameters
+        with wave.open(wav_files[0], 'rb') as first_wav:
+            params = first_wav.getparams()
+            frames = first_wav.readframes(first_wav.getnframes())
+        
+        # Create output file with same parameters
+        with wave.open(output_path, 'wb') as output_wav:
+            output_wav.setparams(params)
+            output_wav.writeframes(frames)
+            
+            # Append remaining files
+            for wav_file in wav_files[1:]:
+                with wave.open(wav_file, 'rb') as wav:
+                    frames = wav.readframes(wav.getnframes())
+                    output_wav.writeframes(frames)
+        
+        logger.info(f"Merged {len(wav_files)} files into {output_path}")
+        return True
+    except Exception as e:
+        logger.error(f"Error merging WAV files: {e}")
         return False
 
 
@@ -240,7 +353,7 @@ def generate_speech(
     audio_chunks = []
     mime_type = None
     
-    logger.info("Generating audio... Please wait.")
+    logger.info(f"Generating audio for {len(text)} characters...")
     
     try:
         with tqdm(desc="Streaming audio chunks", unit="chunk") as progress:
@@ -372,7 +485,95 @@ def string_to_speech(
     return success, output_path if success else None
 
 
-def text_to_speech(config: Dict[str, Union[str, float]]) -> bool:
+def text_to_speech_chunked(
+    text: str,
+    voice: str = DEFAULT_CONFIG["voice"],
+    model: str = DEFAULT_CONFIG["model"],
+    temperature: float = DEFAULT_CONFIG["temperature"],
+    output_dir: str = DEFAULT_CONFIG["output_dir"],
+    output_prefix: str = DEFAULT_CONFIG["output_prefix"],
+    max_chunk_size: int = DEFAULT_CONFIG["max_chunk_size"]
+) -> Tuple[bool, Optional[str]]:
+    """
+    Convert text to speech with chunking support for large texts.
+    
+    Args:
+        text: The text to convert to speech
+        voice: Voice to use
+        model: Gemini model to use
+        temperature: Temperature parameter
+        output_dir: Directory to save the output file
+        output_prefix: Prefix for the output filename
+        max_chunk_size: Maximum size of each chunk in characters
+        
+    Returns:
+        Tuple of (success, output_path)
+    """
+    if not text or not text.strip():
+        logger.error("No content to convert to speech!")
+        return False, None
+    
+    # Check if chunking is needed
+    if len(text) <= max_chunk_size:
+        logger.info("Text is small enough, processing without chunking")
+        return string_to_speech(
+            text=text,
+            voice=voice,
+            model=model,
+            temperature=temperature,
+            output_dir=output_dir,
+            output_prefix=output_prefix
+        )
+    
+    logger.info(f"Text is large ({len(text)} chars), splitting into chunks...")
+    
+    # Split text into chunks
+    chunks = split_text_into_chunks(text, max_chunk_size)
+    
+    # Create temporary directory for chunk files
+    with tempfile.TemporaryDirectory() as temp_dir:
+        chunk_files = []
+        
+        # Process each chunk
+        for i, chunk in enumerate(chunks):
+            logger.info(f"Processing chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
+            
+            chunk_output_path = os.path.join(temp_dir, f"chunk_{i:03d}.wav")
+            
+            success, chunk_path = string_to_speech(
+                text=chunk,
+                output_path=chunk_output_path,
+                voice=voice,
+                model=model,
+                temperature=temperature,
+                output_dir=temp_dir,
+                output_prefix=f"chunk_{i:03d}"
+            )
+            
+            if success and chunk_path:
+                chunk_files.append(chunk_path)
+            else:
+                logger.error(f"Failed to process chunk {i+1}")
+                return False, None
+        
+        # Merge all chunk files
+        if chunk_files:
+            output_filename = generate_output_filename(output_prefix, voice)
+            final_output_path = os.path.join(output_dir, f"{output_filename}.wav")
+            
+            success = merge_wav_files(chunk_files, final_output_path)
+            if success:
+                logger.info(f"Successfully merged {len(chunk_files)} chunks into {final_output_path}")
+                return True, final_output_path
+            else:
+                logger.error("Failed to merge audio chunks")
+                return False, None
+        else:
+            logger.error("No chunk files were created")
+            return False, None
+
+
+def text_to_speech(config: Dict[str, Union[str, float, int, bool]]) -> bool:
     """
     Convert text to speech using the provided configuration.
     
@@ -392,15 +593,27 @@ def text_to_speech(config: Dict[str, Union[str, float]]) -> bool:
         logger.error("No content to convert to speech!")
         return False
     
-    # Use the string_to_speech function with the read text
-    success, _ = string_to_speech(
-        text=text,
-        voice=config["voice"],
-        model=config["model"],
-        temperature=config["temperature"],
-        output_dir=config["output_dir"],
-        output_prefix=config["output_prefix"]
-    )
+    # Check if chunking is enabled
+    if config.get("enable_chunking", True):
+        success, output_path = text_to_speech_chunked(
+            text=text,
+            voice=config["voice"],
+            model=config["model"],
+            temperature=config["temperature"],
+            output_dir=config["output_dir"],
+            output_prefix=config["output_prefix"],
+            max_chunk_size=config.get("max_chunk_size", 3000)
+        )
+    else:
+        # Use the original single-chunk method
+        success, output_path = string_to_speech(
+            text=text,
+            voice=config["voice"],
+            model=config["model"],
+            temperature=config["temperature"],
+            output_dir=config["output_dir"],
+            output_prefix=config["output_prefix"]
+        )
     
     return success
 
@@ -456,6 +669,19 @@ def parse_arguments():
     )
     
     parser.add_argument(
+        "--chunk-size",
+        help=f"Maximum chunk size in characters (default: {DEFAULT_CONFIG['max_chunk_size']})",
+        type=int,
+        default=DEFAULT_CONFIG["max_chunk_size"]
+    )
+    
+    parser.add_argument(
+        "--no-chunking",
+        help="Disable text chunking (process entire text at once)",
+        action="store_true"
+    )
+    
+    parser.add_argument(
         "--list-voices",
         help="List available voices and exit",
         action="store_true"
@@ -473,20 +699,102 @@ def parse_arguments():
 def list_available_voices():
     """
     List available voices for the Gemini TTS API.
-    This is a placeholder as the actual list may change over time.
     """
-    voices = [
-        "Puck",
-        "Pixie",
-        "Nova",
-        "Echo",
-        "Fable",
-        "Ember"
+    # Vietnamese voices
+    vietnamese_female_voices = [
+        "Achernar",     # FEMALE
+        "Aoede",        # FEMALE
+        "Autonoe",      # FEMALE
+        "Callirrhoe",   # FEMALE
+        "Despina",      # FEMALE
+        "Erinome",      # FEMALE
+        "Gacrux",       # FEMALE
+        "Kore",         # FEMALE
+        "Laomedeia",    # FEMALE
+        "Leda",         # FEMALE
+        "Pulcherrima",  # FEMALE
+        "Sulafat",      # FEMALE
+        "Vindemiatrix", # FEMALE
+        "Zephyr"        # FEMALE
     ]
     
-    print("\nAvailable voices:")
-    for voice in voices:
+    vietnamese_male_voices = [
+        "Achird",       # MALE
+        "Algenib",      # MALE
+        "Algieba",      # MALE
+        "Alnilam",      # MALE
+        "Charon",       # MALE
+        "Enceladus",    # MALE
+        "Fenrir",       # MALE
+        "Iapetus",      # MALE
+        "Orus",         # MALE
+        "Puck",         # MALE
+        "Rasalgethi",   # MALE
+        "Sadachbia",    # MALE
+        "Sadaltager",   # MALE
+        "Schedar",      # MALE
+        "Umbriel",      # MALE
+        "Zubenelgenubi" # MALE
+    ]
+    
+    # English (US) voices
+    english_female_voices = [
+        "Achernar",     # FEMALE
+        "Aoede",        # FEMALE
+        "Autonoe",      # FEMALE
+        "Callirrhoe",   # FEMALE
+        "Despina",      # FEMALE
+        "Erinome",      # FEMALE
+        "Gacrux",       # FEMALE
+        "Kore",         # FEMALE
+        "Laomedeia",    # FEMALE
+        "Leda",         # FEMALE
+        "Pulcherrima",  # FEMALE
+        "Sulafat",      # FEMALE
+        "Vindemiatrix", # FEMALE
+        "Zephyr",       # FEMALE
+        "Chirp-HD-F",   # FEMALE
+        "Chirp-HD-O"    # FEMALE
+    ]
+    
+    english_male_voices = [
+        "Achird",       # MALE
+        "Algenib",      # MALE
+        "Algieba",      # MALE
+        "Alnilam",      # MALE
+        "Charon",       # MALE
+        "Enceladus",    # MALE
+        "Fenrir",       # MALE
+        "Iapetus",      # MALE
+        "Orus",         # MALE
+        "Puck",         # MALE
+        "Rasalgethi",   # MALE
+        "Sadachbia",    # MALE
+        "Sadaltager",   # MALE
+        "Schedar",      # MALE
+        "Umbriel",      # MALE
+        "Zubenelgenubi", # MALE
+        "Casual-K",     # MALE
+        "Chirp-HD-D"    # MALE
+    ]
+    
+
+    print("\nVietnamese Female Voices:")
+    for voice in vietnamese_female_voices:
         print(f"  - {voice}")
+        
+    print("\nVietnamese Male Voices:")
+    for voice in vietnamese_male_voices:
+        print(f"  - {voice}")
+        
+    print("\nEnglish (US) Female Voices:")
+    for voice in english_female_voices:
+        print(f"  - {voice}")
+        
+    print("\nEnglish (US) Male Voices:")
+    for voice in english_male_voices:
+        print(f"  - {voice}")
+        
     print("\nNote: This list may not be complete. Check Google Gemini documentation for the latest available voices.")
 
 
@@ -515,7 +823,9 @@ def main():
         "output_prefix": args.prefix,
         "voice": args.voice,
         "model": args.model,
-        "temperature": args.temperature
+        "temperature": args.temperature,
+        "max_chunk_size": args.chunk_size,
+        "enable_chunking": not args.no_chunking
     })
     
     # Run the text-to-speech conversion

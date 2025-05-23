@@ -164,3 +164,21 @@ This improved version includes several enhancements:
 ## License
 
 This project is open source and available under the MIT License.
+
+## Changelog
+
+### Version 1.1 (2025-05-23)
+
+**New Features:**
+- **Text Chunking**: Automatically splits large input text into chunks of 3000 characters to handle long texts more efficiently
+- **Enhanced Voice Support**: Updated and expanded voice options for both Vietnamese and English languages
+- **Improved Processing**: Better handling of large text files with automatic chunking and merging
+
+**Technical Improvements:**
+- Optimized text processing for better performance with large files
+- Enhanced voice selection and configuration
+- Improved error handling for chunked text processing
+
+**Bug Fixes:**
+- Fixed issues with processing very long text files
+- Improved stability when handling multiple text chunks
