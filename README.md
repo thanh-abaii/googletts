@@ -1,15 +1,21 @@
-# Google Text-to-Speech Converter
+# Google Text-to-Speech Converter v1.2
 
 A Python script that converts text to speech using Google's Gemini API. This tool reads text from an input file, sends it to the Gemini API for TTS conversion, and saves the resulting audio as a WAV file.
+
+Enhanced with intelligent text chunking for large files and seamless audio merging capabilities.
 
 ## Features
 
 - Converts text from a file to speech using Google's Gemini API
-- Supports configurable voice selection
+- **Smart Text Chunking**: Automatically splits large texts at natural boundaries (sentences, clauses, words)
+- **Seamless Audio Merging**: Combines multiple audio chunks with configurable pauses
+- **Intelligent Splitting**: Preserves sentence structure and avoids cutting words mid-way
+- Supports configurable voice selection with expanded Vietnamese and English voices
 - Automatically converts audio to WAV format if needed
 - Provides progress indication during audio generation
 - Includes comprehensive error handling and logging
 - Generates timestamped output files
+- Configurable chunk size (default: 4000 characters) and pause duration
 
 ## Requirements
 
@@ -64,6 +70,9 @@ Available options:
                         Gemini model to use (default: gemini-2.5-flash-preview-tts)
   -t TEMPERATURE, --temperature TEMPERATURE
                         Temperature parameter (default: 1.0)
+  --chunk-size CHUNK_SIZE
+                        Maximum chunk size in characters (default: 4000)
+  --no-chunking         Disable text chunking (process entire text at once)
   --list-voices         List available voices and exit
   -d, --debug           Enable debug logging
 ```
@@ -167,10 +176,32 @@ This project is open source and available under the MIT License.
 
 ## Changelog
 
+### Version 1.2 (2025-05-23)
+
+**Major Features:**
+- **Smart Text Chunking Algorithm**: Intelligent text splitting that preserves natural boundaries
+  - Prioritizes splitting at paragraphs, sentences, clauses, and words (in that order)
+  - Prevents cutting words or sentences in the middle
+  - Post-processing to ensure chunks end at natural boundaries
+- **Seamless Audio Merging**: Enhanced audio merging with configurable pause duration (300ms default)
+- **Improved Chunk Size**: Increased default chunk size from 3000 to 4000 characters for better quality
+- **Natural Boundary Detection**: Advanced regex patterns for sentence endings, clause separators, and paragraph breaks
+
+**Technical Improvements:**
+- Enhanced `split_text_into_chunks()` function with multi-level splitting strategy
+- Improved `merge_wav_files()` with silence generation between chunks
+- Better preservation of punctuation and grammatical structure
+- Comprehensive logging for chunk processing and debugging
+
+**Bug Fixes:**
+- Resolved issue where text was cut in the middle of words or sentences
+- Fixed audio discontinuity problems when merging chunks
+- Improved handling of various text formats and structures
+
 ### Version 1.1 (2025-05-23)
 
 **New Features:**
-- **Text Chunking**: Automatically splits large input text into chunks of 3000 characters to handle long texts more efficiently
+- **Text Chunking**: Automatically splits large input text into chunks of 4000 characters to handle long texts more efficiently
 - **Enhanced Voice Support**: Updated and expanded voice options for both Vietnamese and English languages
 - **Improved Processing**: Better handling of large text files with automatic chunking and merging
 

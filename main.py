@@ -37,11 +37,12 @@ DEFAULT_CONFIG = {
     "model": "gemini-2.5-flash-preview-tts",
     "voice": "Puck",
     "temperature": 1.0,
-    "input_file": "input.txt",
+    "input_file": "input1.txt",
     "output_dir": ".",
     "output_prefix": "output",
-    "max_chunk_size": 3000,  # Maximum characters per chunk
-    "enable_chunking": True   # Enable automatic text chunking for large texts
+    "max_chunk_size": 4000,  # Maximum characters per chunk
+    "enable_chunking": True,  # Enable automatic text chunking for large texts
+    "pause_between_chunks_ms": 300  # Pause between chunks in milliseconds
 }
 
 
@@ -80,16 +81,16 @@ def read_input_text(file_path: str) -> Optional[str]:
         return None
 
 
-def split_text_into_chunks(text: str, max_chunk_size: int = 3000) -> List[str]:
+def split_text_into_chunks(text: str, max_chunk_size: int = 4000) -> List[str]:
     """
-    Split text into smaller chunks while preserving sentence boundaries.
+    Split text into smaller chunks while preserving natural boundaries and ensuring smooth transitions.
     
     Args:
         text: The text to split
         max_chunk_size: Maximum size of each chunk in characters
         
     Returns:
-        List of text chunks
+        List of text chunks with natural boundaries
     """
     if len(text) <= max_chunk_size:
         return [text]
@@ -97,54 +98,172 @@ def split_text_into_chunks(text: str, max_chunk_size: int = 3000) -> List[str]:
     chunks = []
     current_chunk = ""
     
-    # Split by paragraphs first
-    paragraphs = text.split('\n\n')
+    # Define sentence ending patterns (more comprehensive)
+    sentence_endings = r'(?<=[.!?…])\s+'
+    # Define clause separators for better splitting
+    clause_separators = r'(?<=[,;:])\s+'
+    # Define paragraph separators
+    paragraph_separators = r'\n\s*\n'
     
-    for paragraph in paragraphs:
-        # If paragraph is too long, split by sentences
-        if len(paragraph) > max_chunk_size:
-            sentences = re.split(r'(?<=[.!?])\s+', paragraph)
+    # First, split by paragraphs
+    paragraphs = re.split(paragraph_separators, text)
+    
+    for paragraph_idx, paragraph in enumerate(paragraphs):
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
             
-            for sentence in sentences:
-                # If adding this sentence would exceed the limit
-                if len(current_chunk) + len(sentence) + 1 > max_chunk_size:
-                    if current_chunk:
-                        chunks.append(current_chunk.strip())
-                        current_chunk = sentence
-                    else:
-                        # Single sentence is too long, split by words
-                        words = sentence.split()
-                        temp_chunk = ""
-                        for word in words:
-                            if len(temp_chunk) + len(word) + 1 > max_chunk_size:
-                                if temp_chunk:
-                                    chunks.append(temp_chunk.strip())
-                                    temp_chunk = word
-                                else:
-                                    # Single word is too long, just add it
-                                    chunks.append(word)
-                            else:
-                                temp_chunk += " " + word if temp_chunk else word
-                        if temp_chunk:
-                            current_chunk = temp_chunk
-                else:
-                    current_chunk += " " + sentence if current_chunk else sentence
-        else:
-            # If adding this paragraph would exceed the limit
-            if len(current_chunk) + len(paragraph) + 2 > max_chunk_size:
-                if current_chunk:
-                    chunks.append(current_chunk.strip())
-                    current_chunk = paragraph
-                else:
-                    current_chunk = paragraph
+        # If paragraph fits in current chunk, add it
+        if len(current_chunk) + len(paragraph) + 2 <= max_chunk_size:
+            if current_chunk:
+                current_chunk += "\n\n" + paragraph
             else:
-                current_chunk += "\n\n" + paragraph if current_chunk else paragraph
+                current_chunk = paragraph
+        else:
+            # Save current chunk if it exists
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+                current_chunk = ""
+            
+            # If paragraph is small enough, start new chunk with it
+            if len(paragraph) <= max_chunk_size:
+                current_chunk = paragraph
+            else:
+                # Split large paragraph by sentences
+                sentences = re.split(sentence_endings, paragraph)
+                
+                for sentence_idx, sentence in enumerate(sentences):
+                    sentence = sentence.strip()
+                    if not sentence:
+                        continue
+                    
+                    # If sentence fits in current chunk, add it
+                    if len(current_chunk) + len(sentence) + 1 <= max_chunk_size:
+                        if current_chunk:
+                            current_chunk += " " + sentence
+                        else:
+                            current_chunk = sentence
+                    else:
+                        # Save current chunk if it exists
+                        if current_chunk:
+                            chunks.append(current_chunk.strip())
+                            current_chunk = ""
+                        
+                        # If sentence is small enough, start new chunk with it
+                        if len(sentence) <= max_chunk_size:
+                            current_chunk = sentence
+                        else:
+                            # Split large sentence by clauses
+                            clauses = re.split(clause_separators, sentence)
+                            
+                            for clause_idx, clause in enumerate(clauses):
+                                clause = clause.strip()
+                                if not clause:
+                                    continue
+                                
+                                # If clause fits in current chunk, add it
+                                if len(current_chunk) + len(clause) + 1 <= max_chunk_size:
+                                    if current_chunk:
+                                        # Add appropriate separator based on original text
+                                        if clause_idx > 0 and len(clauses) > 1:
+                                            # Try to preserve original punctuation
+                                            separator = ", " if "," in sentence else "; " if ";" in sentence else ": " if ":" in sentence else " "
+                                            current_chunk += separator + clause
+                                        else:
+                                            current_chunk += " " + clause
+                                    else:
+                                        current_chunk = clause
+                                else:
+                                    # Save current chunk if it exists
+                                    if current_chunk:
+                                        chunks.append(current_chunk.strip())
+                                        current_chunk = ""
+                                    
+                                    # If clause is still too long, split by words as last resort
+                                    if len(clause) > max_chunk_size:
+                                        words = clause.split()
+                                        temp_chunk = ""
+                                        
+                                        for word in words:
+                                            # Check if adding this word would exceed limit
+                                            test_length = len(temp_chunk) + len(word) + (1 if temp_chunk else 0)
+                                            
+                                            if test_length <= max_chunk_size:
+                                                temp_chunk += " " + word if temp_chunk else word
+                                            else:
+                                                # Save current temp chunk
+                                                if temp_chunk:
+                                                    chunks.append(temp_chunk.strip())
+                                                    temp_chunk = word
+                                                else:
+                                                    # Single word is too long, but we have to include it
+                                                    chunks.append(word)
+                                                    temp_chunk = ""
+                                        
+                                        if temp_chunk:
+                                            current_chunk = temp_chunk
+                                    else:
+                                        current_chunk = clause
     
+    # Add the last chunk if it exists
     if current_chunk:
         chunks.append(current_chunk.strip())
     
-    logger.info(f"Split text into {len(chunks)} chunks")
-    return chunks
+    # Post-process chunks to ensure they end at natural boundaries
+    processed_chunks = []
+    for i, chunk in enumerate(chunks):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+            
+        # If this is not the last chunk, try to end at a natural boundary
+        if i < len(chunks) - 1:
+            # Try to end at sentence boundary
+            last_sentence_end = max(
+                chunk.rfind('.'),
+                chunk.rfind('!'),
+                chunk.rfind('?'),
+                chunk.rfind('…')
+            )
+            
+            # If no sentence ending found, try clause boundary
+            if last_sentence_end == -1 or last_sentence_end < len(chunk) * 0.7:
+                last_clause_end = max(
+                    chunk.rfind(','),
+                    chunk.rfind(';'),
+                    chunk.rfind(':')
+                )
+                
+                # Use clause boundary if it's in the latter part of the chunk
+                if last_clause_end > len(chunk) * 0.7:
+                    # Move the remainder to the next chunk
+                    remainder = chunk[last_clause_end + 1:].strip()
+                    chunk = chunk[:last_clause_end + 1].strip()
+                    
+                    # Add remainder to the beginning of next chunk
+                    if remainder and i + 1 < len(chunks):
+                        chunks[i + 1] = remainder + " " + chunks[i + 1]
+            elif last_sentence_end < len(chunk) - 1:
+                # Move the remainder to the next chunk
+                remainder = chunk[last_sentence_end + 1:].strip()
+                chunk = chunk[:last_sentence_end + 1].strip()
+                
+                # Add remainder to the beginning of next chunk
+                if remainder and i + 1 < len(chunks):
+                    chunks[i + 1] = remainder + " " + chunks[i + 1]
+        
+        processed_chunks.append(chunk)
+    
+    # Filter out empty chunks
+    final_chunks = [chunk for chunk in processed_chunks if chunk.strip()]
+    
+    logger.info(f"Split text into {len(final_chunks)} chunks with natural boundaries")
+    
+    # Log chunk information for debugging
+    for i, chunk in enumerate(final_chunks):
+        logger.debug(f"Chunk {i+1}: {len(chunk)} chars, ends with: '{chunk[-20:]}'")
+    
+    return final_chunks
 
 
 def save_binary_file(file_path: str, data: bytes) -> bool:
@@ -171,13 +290,36 @@ def save_binary_file(file_path: str, data: bytes) -> bool:
         return False
 
 
-def merge_wav_files(wav_files: List[str], output_path: str) -> bool:
+def create_silence(duration_ms: int, sample_rate: int = 24000, channels: int = 1, bits_per_sample: int = 16) -> bytes:
     """
-    Merge multiple WAV files into a single WAV file.
+    Create silence audio data.
+    
+    Args:
+        duration_ms: Duration of silence in milliseconds
+        sample_rate: Sample rate in Hz
+        channels: Number of audio channels
+        bits_per_sample: Bits per sample
+        
+    Returns:
+        Silence audio data as bytes
+    """
+    samples_per_ms = sample_rate / 1000
+    total_samples = int(duration_ms * samples_per_ms)
+    bytes_per_sample = bits_per_sample // 8
+    
+    # Create silence (zeros)
+    silence_data = b'\x00' * (total_samples * channels * bytes_per_sample)
+    return silence_data
+
+
+def merge_wav_files(wav_files: List[str], output_path: str, pause_between_chunks_ms: int = 300) -> bool:
+    """
+    Merge multiple WAV files into a single WAV file with optional pauses between chunks.
     
     Args:
         wav_files: List of WAV file paths to merge
         output_path: Output path for the merged file
+        pause_between_chunks_ms: Pause duration between chunks in milliseconds
         
     Returns:
         True if successful, False otherwise
@@ -192,18 +334,30 @@ def merge_wav_files(wav_files: List[str], output_path: str) -> bool:
             params = first_wav.getparams()
             frames = first_wav.readframes(first_wav.getnframes())
         
+        # Create silence for pauses between chunks
+        silence_data = create_silence(
+            duration_ms=pause_between_chunks_ms,
+            sample_rate=params.framerate,
+            channels=params.nchannels,
+            bits_per_sample=params.sampwidth * 8
+        ) if pause_between_chunks_ms > 0 else b''
+        
         # Create output file with same parameters
         with wave.open(output_path, 'wb') as output_wav:
             output_wav.setparams(params)
             output_wav.writeframes(frames)
             
-            # Append remaining files
-            for wav_file in wav_files[1:]:
+            # Append remaining files with pauses
+            for i, wav_file in enumerate(wav_files[1:], 1):
+                # Add pause before next chunk (except for the first chunk)
+                if silence_data:
+                    output_wav.writeframes(silence_data)
+                    
                 with wave.open(wav_file, 'rb') as wav:
                     frames = wav.readframes(wav.getnframes())
                     output_wav.writeframes(frames)
         
-        logger.info(f"Merged {len(wav_files)} files into {output_path}")
+        logger.info(f"Merged {len(wav_files)} files into {output_path} with {pause_between_chunks_ms}ms pauses")
         return True
     except Exception as e:
         logger.error(f"Error merging WAV files: {e}")
@@ -492,7 +646,8 @@ def text_to_speech_chunked(
     temperature: float = DEFAULT_CONFIG["temperature"],
     output_dir: str = DEFAULT_CONFIG["output_dir"],
     output_prefix: str = DEFAULT_CONFIG["output_prefix"],
-    max_chunk_size: int = DEFAULT_CONFIG["max_chunk_size"]
+    max_chunk_size: int = DEFAULT_CONFIG["max_chunk_size"],
+    pause_between_chunks_ms: int = DEFAULT_CONFIG["pause_between_chunks_ms"]
 ) -> Tuple[bool, Optional[str]]:
     """
     Convert text to speech with chunking support for large texts.
@@ -561,7 +716,7 @@ def text_to_speech_chunked(
             output_filename = generate_output_filename(output_prefix, voice)
             final_output_path = os.path.join(output_dir, f"{output_filename}.wav")
             
-            success = merge_wav_files(chunk_files, final_output_path)
+            success = merge_wav_files(chunk_files, final_output_path, pause_between_chunks_ms)
             if success:
                 logger.info(f"Successfully merged {len(chunk_files)} chunks into {final_output_path}")
                 return True, final_output_path
@@ -602,7 +757,8 @@ def text_to_speech(config: Dict[str, Union[str, float, int, bool]]) -> bool:
             temperature=config["temperature"],
             output_dir=config["output_dir"],
             output_prefix=config["output_prefix"],
-            max_chunk_size=config.get("max_chunk_size", 3000)
+            max_chunk_size=config.get("max_chunk_size", 4000),
+            pause_between_chunks_ms=config.get("pause_between_chunks_ms", 300)
         )
     else:
         # Use the original single-chunk method
