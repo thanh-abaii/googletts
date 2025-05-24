@@ -37,7 +37,7 @@ DEFAULT_CONFIG = {
     "model": "gemini-2.5-flash-preview-tts",
     "voice": "Puck",
     "temperature": 1.0,
-    "input_file": "input1.txt",
+    "input_file": "input.txt",
     "output_dir": ".",
     "output_prefix": "output",
     "max_chunk_size": 4000,  # Maximum characters per chunk
@@ -647,7 +647,8 @@ def text_to_speech_chunked(
     output_dir: str = DEFAULT_CONFIG["output_dir"],
     output_prefix: str = DEFAULT_CONFIG["output_prefix"],
     max_chunk_size: int = DEFAULT_CONFIG["max_chunk_size"],
-    pause_between_chunks_ms: int = DEFAULT_CONFIG["pause_between_chunks_ms"]
+    pause_between_chunks_ms: int = DEFAULT_CONFIG["pause_between_chunks_ms"],
+    max_retries: int = 3
 ) -> Tuple[bool, Optional[str]]:
     """
     Convert text to speech with chunking support for large texts.
@@ -660,6 +661,8 @@ def text_to_speech_chunked(
         output_dir: Directory to save the output file
         output_prefix: Prefix for the output filename
         max_chunk_size: Maximum size of each chunk in characters
+        pause_between_chunks_ms: Pause duration between chunks in milliseconds
+        max_retries: Maximum number of retry attempts per chunk
         
     Returns:
         Tuple of (success, output_path)
@@ -689,26 +692,48 @@ def text_to_speech_chunked(
     with tempfile.TemporaryDirectory() as temp_dir:
         chunk_files = []
         
-        # Process each chunk
+        # Process each chunk with retry logic
         for i, chunk in enumerate(chunks):
             logger.info(f"Processing chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
             
             chunk_output_path = os.path.join(temp_dir, f"chunk_{i:03d}.wav")
+            chunk_processed = False
             
-            success, chunk_path = string_to_speech(
-                text=chunk,
-                output_path=chunk_output_path,
-                voice=voice,
-                model=model,
-                temperature=temperature,
-                output_dir=temp_dir,
-                output_prefix=f"chunk_{i:03d}"
-            )
+            # Retry logic for each chunk
+            for attempt in range(max_retries):
+                try:
+                    if attempt > 0:
+                        logger.info(f"Retrying chunk {i+1}, attempt {attempt+1}/{max_retries}")
+                    
+                    success, chunk_path = string_to_speech(
+                        text=chunk,
+                        output_path=chunk_output_path,
+                        voice=voice,
+                        model=model,
+                        temperature=temperature,
+                        output_dir=temp_dir,
+                        output_prefix=f"chunk_{i:03d}"
+                    )
+                    
+                    if success and chunk_path:
+                        chunk_files.append(chunk_path)
+                        chunk_processed = True
+                        logger.info(f"Successfully processed chunk {i+1}")
+                        break
+                    else:
+                        logger.warning(f"Attempt {attempt+1} failed for chunk {i+1}")
+                        
+                except Exception as e:
+                    logger.warning(f"Attempt {attempt+1} failed for chunk {i+1} with exception: {e}")
+                
+                # Add a small delay between retries (except for the last attempt)
+                if attempt < max_retries - 1:
+                    import time
+                    time.sleep(2)  # Wait 2 seconds before retry
             
-            if success and chunk_path:
-                chunk_files.append(chunk_path)
-            else:
-                logger.error(f"Failed to process chunk {i+1}")
+            # If all retries failed for this chunk
+            if not chunk_processed:
+                logger.error(f"Failed to process chunk {i+1} after {max_retries} attempts")
                 return False, None
         
         # Merge all chunk files
@@ -731,23 +756,23 @@ def text_to_speech_chunked(
 def text_to_speech(config: Dict[str, Union[str, float, int, bool]]) -> bool:
     """
     Convert text to speech using the provided configuration.
-    
+
     Args:
         config: Configuration dictionary
-        
+
     Returns:
         True if successful, False otherwise
     """
     # Load environment variables
     if not load_environment():
         return False
-        
+
     # Read input text
     text = read_input_text(config["input_file"])
     if not text or not text.strip():
         logger.error("No content to convert to speech!")
         return False
-    
+
     # Check if chunking is enabled
     if config.get("enable_chunking", True):
         success, output_path = text_to_speech_chunked(
@@ -758,7 +783,8 @@ def text_to_speech(config: Dict[str, Union[str, float, int, bool]]) -> bool:
             output_dir=config["output_dir"],
             output_prefix=config["output_prefix"],
             max_chunk_size=config.get("max_chunk_size", 4000),
-            pause_between_chunks_ms=config.get("pause_between_chunks_ms", 300)
+            pause_between_chunks_ms=config.get("pause_between_chunks_ms", 300),
+            max_retries=config.get("max_retries", 3)
         )
     else:
         # Use the original single-chunk method
@@ -770,7 +796,7 @@ def text_to_speech(config: Dict[str, Union[str, float, int, bool]]) -> bool:
             output_dir=config["output_dir"],
             output_prefix=config["output_prefix"]
         )
-    
+
     return success
 
 
@@ -847,6 +873,13 @@ def parse_arguments():
         "-d", "--debug",
         help="Enable debug logging",
         action="store_true"
+    )
+
+    parser.add_argument(
+        "--max_retries",
+        help="Maximum number of retry attempts per chunk (default: 3)",
+        type=int,
+        default=3
     )
     
     return parser.parse_args()
@@ -983,10 +1016,10 @@ def main():
         "max_chunk_size": args.chunk_size,
         "enable_chunking": not args.no_chunking
     })
-    
+
     # Run the text-to-speech conversion
     success = text_to_speech(config)
-    
+
     if success:
         logger.info("Text-to-speech conversion completed successfully.")
     else:
