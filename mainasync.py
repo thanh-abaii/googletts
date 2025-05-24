@@ -23,7 +23,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from tqdm.asyncio import tqdm  # Use tqdm.asyncio for async operations
+# from tqdm.asyncio import tqdm  # Use tqdm.asyncio for async operations <-- REMOVED
 
 # Configure logging
 logging.basicConfig(
@@ -509,34 +509,48 @@ async def generate_speech(
     mime_type = None
     
     logger.info(f"Generating audio for {len(text)} characters...")
-    
+
+    # The client.models.generate_content_stream is a synchronous iterator (generator)
+    # It needs to be iterated in a separate thread to avoid blocking the asyncio event loop.
+    sync_stream_iterator = client.models.generate_content_stream(
+        model=model,
+        contents=contents,
+        config=config,
+    )
+
+    def _iterate_stream_synchronously():
+        _audio_chunks_thread = []
+        _mime_type_thread = None
+        try:
+            for chunk_data in sync_stream_iterator:
+                if (
+                    chunk_data.candidates is None
+                    or chunk_data.candidates[0].content is None
+                    or chunk_data.candidates[0].content.parts is None
+                ):
+                    continue
+                    
+                part = chunk_data.candidates[0].content.parts[0]
+                if part.inline_data:
+                    _audio_chunks_thread.append(part.inline_data.data)
+                    # Ensure mime_type is captured from the first relevant part
+                    if _mime_type_thread is None:
+                         _mime_type_thread = part.inline_data.mime_type
+            return _audio_chunks_thread, _mime_type_thread
+        except Exception as e_thread:
+            # Log errors from the thread, as they might not propagate easily
+            logger.error(f"Error iterating stream in thread: {e_thread}")
+            return [], None # Return empty list and None mime_type on error
+
     try:
-        # Use async for with tqdm.asyncio
-        async for chunk in tqdm(
-            client.models.generate_content_stream(
-                model=model,
-                contents=contents,
-                config=config,
-            ),
-            desc="Streaming audio chunks", unit="chunk"
-        ):
-            if (
-                chunk.candidates is None
-                or chunk.candidates[0].content is None
-                or chunk.candidates[0].content.parts is None
-            ):
-                continue
-                
-            part = chunk.candidates[0].content.parts[0]
-            if part.inline_data:
-                audio_chunks.append(part.inline_data.data)
-                mime_type = part.inline_data.mime_type
-    except Exception as e:
-        logger.error(f"Error generating speech: {e}")
+        audio_chunks, mime_type = await asyncio.to_thread(_iterate_stream_synchronously)
+    except Exception as e_async_to_thread:
+        # This catches errors from asyncio.to_thread itself or if the thread function raises unhandled
+        logger.error(f"Error calling asyncio.to_thread for stream iteration: {e_async_to_thread}")
         return None, None
         
     if not audio_chunks:
-        logger.warning("No audio data received.")
+        logger.warning("No audio data received from stream.")
         return None, None
         
     audio_data = b"".join(audio_chunks)
@@ -606,19 +620,17 @@ async def string_to_speech(
         logger.error("No content to convert to speech!")
         return False, None
     
-    # Load environment variables
+    # These are quick and can remain in the async flow before heavy I/O
     if not load_environment():
         return False, None
     
-    # Initialize Gemini client
     client = initialize_gemini_client()
     if not client:
         return False, None
     
-    # Create TTS configuration
     tts_config = create_tts_config(voice, temperature)
     
-    # Generate speech
+    # Generate speech (async I/O)
     audio_data, mime_type = await generate_speech(
         client,
         model,
@@ -629,17 +641,74 @@ async def string_to_speech(
     if not audio_data or not mime_type:
         return False, None
     
-    # Process audio data
-    processed_audio, file_extension = process_audio_data(audio_data, mime_type)
-    
-    # Determine output path
-    if not output_path:
-        output_filename = generate_output_filename(output_prefix, voice)
-        output_path = os.path.join(output_dir, f"{output_filename}{file_extension}")
-    
-    # Save audio file
-    success = save_binary_file(output_path, processed_audio)
-    return success, output_path if success else None
+    # Blocking operations moved to a thread
+    try:
+        # Step 1: Process audio data (potentially blocking CPU-bound)
+        processed_audio, file_extension = await asyncio.to_thread(
+            process_audio_data, audio_data, mime_type
+        )
+
+        # Step 2: Determine final output path (non-blocking)
+        current_output_path = output_path
+        if not current_output_path:
+            # This part is quick, can stay here
+            output_filename_base = generate_output_filename(output_prefix, voice)
+            current_output_path = os.path.join(output_dir, f"{output_filename_base}{file_extension}")
+        
+        # Step 3: Save audio file (blocking I/O)
+        success_save = await asyncio.to_thread(
+            save_binary_file, current_output_path, processed_audio
+        )
+        
+        return success_save, current_output_path if success_save else None
+
+    except Exception as e:
+        logger.error(f"Error during threaded audio processing/saving for '{output_prefix}': {e}")
+        return False, None
+
+
+async def _process_chunk_with_retries(
+    chunk_text: str,
+    chunk_idx: int,
+    total_chunks: int,
+    output_path: str,
+    voice: str,
+    model: str,
+    temperature: float,
+    output_dir: str,
+    output_prefix: str,
+    max_retries: int
+) -> Tuple[bool, Optional[str]]:
+    """Helper function to process a single chunk with retry logic."""
+    logger.info(f"Processing chunk {chunk_idx+1}/{total_chunks} ({len(chunk_text)} chars)")
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                logger.info(f"Retrying chunk {chunk_idx+1}, attempt {attempt+1}/{max_retries}")
+            
+            success, path = await string_to_speech(
+                text=chunk_text,
+                output_path=output_path,
+                voice=voice,
+                model=model,
+                temperature=temperature,
+                output_dir=output_dir,
+                output_prefix=output_prefix # This prefix is for string_to_speech's internal naming if path not given
+            )
+            if success and path:
+                logger.info(f"Successfully processed chunk {chunk_idx+1} to {path}")
+                return True, path
+            else:
+                logger.warning(f"Attempt {attempt+1} for chunk {chunk_idx+1} failed (string_to_speech returned success=False)")
+        except Exception as e:
+            logger.warning(f"Attempt {attempt+1} for chunk {chunk_idx+1} failed with exception: {e}")
+        
+        if attempt < max_retries - 1:
+            logger.info(f"Waiting 2 seconds before retrying chunk {chunk_idx+1}...")
+            await asyncio.sleep(2)
+            
+    logger.error(f"Failed to process chunk {chunk_idx+1} after {max_retries} attempts")
+    return False, None
 
 
 async def text_to_speech_chunked(
@@ -655,29 +724,15 @@ async def text_to_speech_chunked(
 ) -> Tuple[bool, Optional[str]]:
     """
     Convert text to speech with chunking support for large texts.
-    
-    Args:
-        text: The text to convert to speech
-        voice: Voice to use
-        model: Gemini model to use
-        temperature: Temperature parameter
-        output_dir: Directory to save the output file
-        output_prefix: Prefix for the output filename
-        max_chunk_size: Maximum size of each chunk in characters
-        pause_between_chunks_ms: Pause duration between chunks in milliseconds
-        max_retries: Maximum number of retry attempts per chunk
-        
-    Returns:
-        Tuple of (success, output_path)
+    Tasks for chunks are created with an 8-second delay between each task creation.
     """
     if not text or not text.strip():
         logger.error("No content to convert to speech!")
         return False, None
     
-    # Check if chunking is needed
     if len(text) <= max_chunk_size:
         logger.info("Text is small enough, processing without chunking")
-        return await string_to_speech(
+        return await string_to_speech( # string_to_speech now handles its blocking parts in threads
             text=text,
             voice=voice,
             model=model,
@@ -687,71 +742,77 @@ async def text_to_speech_chunked(
         )
     
     logger.info(f"Text is large ({len(text)} chars), splitting into chunks...")
+    text_chunks = split_text_into_chunks(text, max_chunk_size)
     
-    # Split text into chunks
-    chunks = split_text_into_chunks(text, max_chunk_size)
-    
-    # Create temporary directory for chunk files
     with tempfile.TemporaryDirectory() as temp_dir:
+        tasks = []
+        
+        for i, chunk_content in enumerate(text_chunks):
+            # Define a unique output path for this specific chunk within the temp directory
+            # The output_prefix for _process_chunk_with_retries should be for the chunk itself
+            chunk_specific_output_path = os.path.join(temp_dir, f"{output_prefix}_chunk_{i:03d}.wav")
+            
+            task = asyncio.create_task(
+                _process_chunk_with_retries(
+                    chunk_text=chunk_content,
+                    chunk_idx=i,
+                    total_chunks=len(text_chunks),
+                    output_path=chunk_specific_output_path, # Pass the specific path for this chunk
+                    voice=voice,
+                    model=model,
+                    temperature=temperature,
+                    output_dir=temp_dir, # string_to_speech uses this if output_path is None
+                    output_prefix=f"{output_prefix}_chunk_{i:03d}_retry", # Prefix for string_to_speech if it generates its own path
+                    max_retries=max_retries
+                )
+            )
+            tasks.append(task)
+            
+            if i < len(text_chunks) - 1:
+                logger.info(f"Task for chunk {i+1} created. Waiting 8 seconds before creating task for next chunk.")
+                await asyncio.sleep(8)
+        
+        logger.info(f"All {len(tasks)} chunk processing tasks created. Waiting for completion...")
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
         chunk_files = []
-        
-        # Process each chunk with retry logic
-        for i, chunk in enumerate(chunks):
-            logger.info(f"Processing chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
-            
-            chunk_output_path = os.path.join(temp_dir, f"chunk_{i:03d}.wav")
-            chunk_processed = False
-            
-            # Retry logic for each chunk
-            for attempt in range(max_retries):
-                try:
-                    if attempt > 0:
-                        logger.info(f"Retrying chunk {i+1}, attempt {attempt+1}/{max_retries}")
-                    
-                    success, chunk_path = await string_to_speech(
-                        text=chunk,
-                        output_path=chunk_output_path,
-                        voice=voice,
-                        model=model,
-                        temperature=temperature,
-                        output_dir=temp_dir,
-                        output_prefix=f"chunk_{i:03d}"
-                    )
-                    
-                    if success and chunk_path:
-                        chunk_files.append(chunk_path)
-                        chunk_processed = True
-                        logger.info(f"Successfully processed chunk {i+1}")
-                        break
-                    else:
-                        logger.warning(f"Attempt {attempt+1} failed for chunk {i+1}")
-                        
-                except Exception as e:
-                    logger.warning(f"Attempt {attempt+1} failed for chunk {i+1} with exception: {e}")
-                
-                # Add a small delay between retries (except for the last attempt)
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(2)  # Wait 2 seconds before retry
-            
-            # If all retries failed for this chunk
-            if not chunk_processed:
-                logger.error(f"Failed to process chunk {i+1} after {max_retries} attempts")
-                return False, None
-        
-        # Merge all chunk files
-        if chunk_files:
-            output_filename = generate_output_filename(output_prefix, voice)
-            final_output_path = os.path.join(output_dir, f"{output_filename}.wav")
-            
-            success = merge_wav_files(chunk_files, final_output_path, pause_between_chunks_ms)
-            if success:
-                logger.info(f"Successfully merged {len(chunk_files)} chunks into {final_output_path}")
-                return True, final_output_path
+        all_successful = True
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Task for chunk {i+1} failed with exception: {result}")
+                all_successful = False
+            elif result is None: 
+                logger.error(f"Task for chunk {i+1} returned None unexpectedly.")
+                all_successful = False
             else:
-                logger.error("Failed to merge audio chunks")
-                return False, None
+                success, chunk_path_from_task = result
+                if success and chunk_path_from_task:
+                    chunk_files.append(chunk_path_from_task)
+                else:
+                    all_successful = False
+        
+        if not all_successful:
+            logger.error("One or more chunks failed to process. Aborting merge.")
+            return False, None
+            
+        if not chunk_files: 
+            logger.error("No chunk files were successfully created (all_successful might be true if no chunks).")
+            return False, None # Should be caught by all_successful if empty due to failures
+
+        # Merge all chunk files
+        output_filename_base = generate_output_filename(output_prefix, voice)
+        final_output_path = os.path.join(output_dir, f"{output_filename_base}.wav")
+        
+        # Run merge_wav_files in a thread as it's blocking file I/O
+        merge_success = await asyncio.to_thread(
+            merge_wav_files, chunk_files, final_output_path, pause_between_chunks_ms
+        )
+
+        if merge_success:
+            logger.info(f"Successfully merged {len(chunk_files)} chunks into {final_output_path}")
+            return True, final_output_path
         else:
-            logger.error("No chunk files were created")
+            logger.error("Failed to merge audio chunks.")
             return False, None
 
 
@@ -765,20 +826,17 @@ async def text_to_speech(config: Dict[str, Union[str, float, int, bool]]) -> boo
     Returns:
         True if successful, False otherwise
     """
-    # Load environment variables
     if not load_environment():
         return False
 
-    # Read input text
-    text = read_input_text(config["input_file"])
-    if not text or not text.strip():
+    text_content = read_input_text(config["input_file"]) 
+    if not text_content or not text_content.strip():
         logger.error("No content to convert to speech!")
         return False
 
-    # Check if chunking is enabled
     if config.get("enable_chunking", True):
         success, output_path = await text_to_speech_chunked(
-            text=text,
+            text=text_content,
             voice=config["voice"],
             model=config["model"],
             temperature=config["temperature"],
@@ -789,9 +847,8 @@ async def text_to_speech(config: Dict[str, Union[str, float, int, bool]]) -> boo
             max_retries=config.get("max_retries", 3)
         )
     else:
-        # Use the original single-chunk method
         success, output_path = await string_to_speech(
-            text=text,
+            text=text_content,
             voice=config["voice"],
             model=config["model"],
             temperature=config["temperature"],
@@ -881,7 +938,7 @@ def parse_arguments():
         "--max_retries",
         help="Maximum number of retry attempts per chunk (default: 3)",
         type=int,
-        default=3
+        default=3 
     )
     
     return parser.parse_args()
@@ -991,23 +1048,17 @@ def list_available_voices():
 
 async def main_async():
     """Main async function to run the text-to-speech conversion."""
-    # Parse command line arguments
     args = parse_arguments()
     
-    # Set logging level
     if args.debug:
         logger.setLevel(logging.DEBUG)
         logger.debug("Debug logging enabled")
     
-    # List voices and exit if requested
     if args.list_voices:
         list_available_voices()
         return
     
-    # Create a configuration with default values
     config = DEFAULT_CONFIG.copy()
-    
-    # Override with command line arguments
     config.update({
         "input_file": args.input,
         "output_dir": args.output_dir,
@@ -1016,10 +1067,10 @@ async def main_async():
         "model": args.model,
         "temperature": args.temperature,
         "max_chunk_size": args.chunk_size,
-        "enable_chunking": not args.no_chunking
+        "enable_chunking": not args.no_chunking,
+        "max_retries": args.max_retries 
     })
 
-    # Run the text-to-speech conversion
     success = await text_to_speech(config)
 
     if success:
