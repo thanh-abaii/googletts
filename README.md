@@ -75,6 +75,8 @@ Available options:
   --no-chunking         Disable text chunking (process entire text at once)
   --list-voices         List available voices and exit
   -d, --debug           Enable debug logging
+  --max_retries MAX_RETRIES
+                        Maximum number of retries for API calls (default: 3)
 ```
 
 ### Examples
@@ -175,6 +177,15 @@ This improved version includes several enhancements:
 This project is open source and available under the MIT License.
 
 ## Changelog
+
+### Version 1.3 (2025-05-24)
+
+**New Features:**
+- **Configurable Max Retries**: Added `max_retries` option to control the maximum number of retries for API calls, improving robustness against transient network issues or API rate limits.
+
+**Technical Improvements:**
+- Implemented exponential backoff strategy for retries to prevent overwhelming the API.
+- Enhanced error handling for API requests to gracefully manage failures and retries.
 
 ### Version 1.2 (2025-05-23)
 
