@@ -681,10 +681,14 @@ async def _process_chunk_with_retries(
 ) -> Tuple[bool, Optional[str]]:
     """Helper function to process a single chunk with retry logic."""
     logger.info(f"Processing chunk {chunk_idx+1}/{total_chunks} ({len(chunk_text)} chars)")
+    start_time_chunk_tts = None
     for attempt in range(max_retries):
         try:
             if attempt > 0:
                 logger.info(f"Retrying chunk {chunk_idx+1}, attempt {attempt+1}/{max_retries}")
+            
+            start_time_chunk_tts = datetime.now()
+            logger.info(f"Starting TTS for chunk {chunk_idx+1} at {start_time_chunk_tts} (Attempt {attempt+1})")
             
             success, path = await string_to_speech(
                 text=chunk_text,
@@ -696,12 +700,14 @@ async def _process_chunk_with_retries(
                 output_prefix=output_prefix # This prefix is for string_to_speech's internal naming if path not given
             )
             if success and path:
-                logger.info(f"Successfully processed chunk {chunk_idx+1} to {path}")
+                end_time_chunk_tts = datetime.now()
+                duration_chunk_tts = end_time_chunk_tts - start_time_chunk_tts
+                logger.info(f"Successfully processed chunk {chunk_idx+1} to {path} at {end_time_chunk_tts}. TTS duration: {duration_chunk_tts}")
                 return True, path
             else:
-                logger.warning(f"Attempt {attempt+1} for chunk {chunk_idx+1} failed (string_to_speech returned success=False)")
+                logger.warning(f"Attempt {attempt+1} for chunk {chunk_idx+1} failed (string_to_speech returned success=False) at {datetime.now()}")
         except Exception as e:
-            logger.warning(f"Attempt {attempt+1} for chunk {chunk_idx+1} failed with exception: {e}")
+            logger.warning(f"Attempt {attempt+1} for chunk {chunk_idx+1} failed with exception: {e} at {datetime.now()}")
         
         if attempt < max_retries - 1:
             logger.info(f"Waiting 2 seconds before retrying chunk {chunk_idx+1}...")
@@ -729,10 +735,14 @@ async def text_to_speech_chunked(
     if not text or not text.strip():
         logger.error("No content to convert to speech!")
         return False, None
+
+    overall_start_time = datetime.now()
+    logger.info(f"Starting text_to_speech_chunked process at {overall_start_time}")
     
     if len(text) <= max_chunk_size:
         logger.info("Text is small enough, processing without chunking")
-        return await string_to_speech( # string_to_speech now handles its blocking parts in threads
+        # For single chunk, we still want to log total time
+        success, path = await string_to_speech( # string_to_speech now handles its blocking parts in threads
             text=text,
             voice=voice,
             model=model,
@@ -740,10 +750,17 @@ async def text_to_speech_chunked(
             output_dir=output_dir,
             output_prefix=output_prefix
         )
+        overall_end_time = datetime.now()
+        logger.info(f"Finished single chunk processing at {overall_end_time}. Total duration: {overall_end_time - overall_start_time}")
+        return success, path
     
     logger.info(f"Text is large ({len(text)} chars), splitting into chunks...")
     text_chunks = split_text_into_chunks(text, max_chunk_size)
     
+    # Record start time of the first chunk's task creation, more precise for "từ chunk 1"
+    first_chunk_processing_start_time = datetime.now() 
+    logger.info(f"Starting processing of all chunks at {first_chunk_processing_start_time}")
+
     with tempfile.TemporaryDirectory() as temp_dir:
         tasks = []
         
@@ -774,6 +791,8 @@ async def text_to_speech_chunked(
         
         logger.info(f"All {len(tasks)} chunk processing tasks created. Waiting for completion...")
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        all_chunks_tasks_completed_time = datetime.now()
+        logger.info(f"All chunk processing tasks completed at {all_chunks_tasks_completed_time}. Duration for tasks gathering: {all_chunks_tasks_completed_time - first_chunk_processing_start_time}")
         
         chunk_files = []
         all_successful = True
@@ -793,26 +812,37 @@ async def text_to_speech_chunked(
         
         if not all_successful:
             logger.error("One or more chunks failed to process. Aborting merge.")
+            overall_end_time_failure = datetime.now()
+            logger.info(f"Process aborted due to chunk failure at {overall_end_time_failure}. Total duration: {overall_end_time_failure - first_chunk_processing_start_time}")
             return False, None
             
         if not chunk_files: 
             logger.error("No chunk files were successfully created (all_successful might be true if no chunks).")
+            overall_end_time_no_files = datetime.now()
+            logger.info(f"Process aborted due to no chunk files at {overall_end_time_no_files}. Total duration: {overall_end_time_no_files - first_chunk_processing_start_time}")
             return False, None # Should be caught by all_successful if empty due to failures
 
         # Merge all chunk files
         output_filename_base = generate_output_filename(output_prefix, voice)
         final_output_path = os.path.join(output_dir, f"{output_filename_base}.wav")
         
+        merge_start_time = datetime.now()
+        logger.info(f"Starting merge of {len(chunk_files)} chunks into {final_output_path} at {merge_start_time}")
+        
         # Run merge_wav_files in a thread as it's blocking file I/O
         merge_success = await asyncio.to_thread(
             merge_wav_files, chunk_files, final_output_path, pause_between_chunks_ms
         )
+        
+        merge_end_time = datetime.now()
 
         if merge_success:
-            logger.info(f"Successfully merged {len(chunk_files)} chunks into {final_output_path}")
+            logger.info(f"Successfully merged {len(chunk_files)} chunks into {final_output_path} at {merge_end_time}. Merge duration: {merge_end_time - merge_start_time}")
+            logger.info(f"Total time from start of chunk 1 processing to successful merge: {merge_end_time - first_chunk_processing_start_time}")
             return True, final_output_path
         else:
-            logger.error("Failed to merge audio chunks.")
+            logger.error(f"Failed to merge audio chunks. Merge attempt ended at {merge_end_time}. Merge duration: {merge_end_time - merge_start_time}")
+            logger.info(f"Process failed during merge. Total duration until merge failure: {merge_end_time - first_chunk_processing_start_time}")
             return False, None
 
 
